@@ -1,0 +1,97 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15
+    container_name: solar_scraper_postgres
+    environment:
+      POSTGRES_DB: solar_scraper
+      POSTGRES_USER: solar_user
+      POSTGRES_PASSWORD: solar_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U solar_user -d solar_scraper"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Redis for caching and job queues
+  redis:
+    image: redis:7-alpine
+    container_name: solar_scraper_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # FastAPI Backend
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: solar_scraper_backend
+    environment:
+      DATABASE_URL: postgresql://solar_user:solar_password@postgres:5432/solar_scraper
+      JWT_SECRET_KEY: your-super-secret-jwt-key-change-in-production
+      REDIS_URL: redis://redis:6379
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # React Frontend
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: solar_scraper_frontend
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    environment:
+      REACT_APP_API_URL: http://localhost:8000
+    depends_on:
+      - backend
+    command: npm start
+
+  # Scrapy Worker (for background scraping jobs)
+  scrapy-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.scrapy
+    container_name: solar_scraper_scrapy_worker
+    environment:
+      DATABASE_URL: postgresql://solar_user:solar_password@postgres:5432/solar_scraper
+    volumes:
+      - ./backend:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: python -c "from scrapy.crawler import CrawlerProcess; from scrapy_spiders.spiders.solar_search import SolarSearchSpider; process = CrawlerProcess(); process.crawl(SolarSearchSpider); process.start()"
+
+volumes:
+  postgres_data:
+  redis_data:
